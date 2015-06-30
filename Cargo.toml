@@ -1,0 +1,21 @@
+[package]
+name = "systemd"
+version = "0.0.1"
+authors = ["Scott Talbot <s@chikachow.org>"]
+license = "MPL2.0"
+readme = "README.md"
+keywords = ["systemd"]
+repository = "https://github.com/cysp/systemd-rs"
+homepage = "https://github.com/cysp/systemd-rs"
+description = """
+Bindings to libsystemd.
+"""
+
+[dependencies]
+libc = "0.1"
+time = "0.1"
+libsystemd-sys = { path = "libsystemd-sys", version = "0.0.1" }
+
+[lib]
+name = "libsystemd"
+path = "src/lib.rs"

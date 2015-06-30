@@ -1,0 +1,19 @@
+[package]
+name = "libsystemd-sys"
+version = "0.0.1"
+authors = ["Scott Talbot <s@chikachow.org>"]
+links = "systemd"
+build = "build.rs"
+repository = "https://github.com/cysp/libsystemd-rs"
+license = "MPL2.0"
+description = "Native bindings to the libsystemd library"
+
+[lib]
+name = "libsystemd_sys"
+path = "lib.rs"
+
+[dependencies]
+libc = "0.1"
+
+[build-dependencies]
+pkg-config = "0.3"

@@ -1,0 +1,16 @@
+sudo: false
+
+language: rust
+rust:
+# - stable
+  - beta
+  - nightly
+
+branches:
+  only:
+    - master
+    - develop
+    - /^feature\//
+
+script:
+  - cargo rustc -Zno-trans
