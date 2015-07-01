@@ -31,11 +31,11 @@ fn main() {
     let _ = e.run(time::Duration::milliseconds(1));
     let mut e_for_exiting = e.clone();
 
-    let now = e.now(EventClock::Monotonic).unwrap();
+    let now = e.now::<MonotonicEventClockTimestamp>().unwrap();
 
-    let t1: Rc<RefCell<Option<TimeEventSource>>> = Rc::new(RefCell::new(None));
+    let t1: Rc<RefCell<Option<TimeEventSource<_>>>> = Rc::new(RefCell::new(None));
     let (t1_for_t1, counter) = (t1.clone(), Cell::new(0u32));
-    *(t1.borrow_mut()) = e.add_time(EventClock::Monotonic, now + Duration::seconds(1), Duration::milliseconds(500), move |d| {
+    *(t1.borrow_mut()) = e.add_time(now + Duration::seconds(1), Duration::milliseconds(500), move |d| {
         let count = counter.get() + 1;
         counter.set(count);
         println!("t1 called for the {}{} time", count, ordinal_suffix(count));

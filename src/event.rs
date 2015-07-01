@@ -76,6 +76,55 @@ impl EventClock {
     }
 }
 
+pub trait EventClockTimestamp {
+    fn clock() -> EventClock;
+    fn from_usec(usec: u64) -> Self;
+    fn usec(&self) -> u64;
+}
+
+#[derive(Copy,Clone,Debug,PartialEq,Eq,PartialOrd,Ord)]
+pub struct RealtimeEventClockTimestamp(u64);
+impl EventClockTimestamp for RealtimeEventClockTimestamp {
+    fn clock() -> EventClock { EventClock::Realtime }
+    fn from_usec(usec: u64) -> RealtimeEventClockTimestamp {
+        RealtimeEventClockTimestamp(usec)
+    }
+    fn usec(&self) -> u64 { self.0 }
+}
+
+impl std::ops::Add<time::Duration> for RealtimeEventClockTimestamp {
+    type Output = RealtimeEventClockTimestamp;
+    fn add(self, rhs: time::Duration) -> RealtimeEventClockTimestamp {
+        let rhs_usec = match rhs.num_microseconds() {
+            None => panic!(),
+            Some(usec) => usec,
+        };
+        RealtimeEventClockTimestamp(((self.0 as i64) + rhs_usec) as u64)
+    }
+}
+
+#[derive(Copy,Clone,Debug,PartialEq,Eq,PartialOrd,Ord)]
+pub struct MonotonicEventClockTimestamp(u64);
+impl EventClockTimestamp for MonotonicEventClockTimestamp {
+    fn clock() -> EventClock { EventClock::Monotonic }
+    fn from_usec(usec: u64) -> MonotonicEventClockTimestamp {
+        MonotonicEventClockTimestamp(usec)
+    }
+    fn usec(&self) -> u64 { self.0 }
+}
+
+impl std::ops::Add<time::Duration> for MonotonicEventClockTimestamp {
+    type Output = MonotonicEventClockTimestamp;
+    fn add(self, rhs: time::Duration) -> MonotonicEventClockTimestamp {
+        let rhs_usec = match rhs.num_microseconds() {
+            None => panic!(),
+            Some(usec) => usec,
+        };
+        MonotonicEventClockTimestamp(((self.0 as i64) + rhs_usec) as u64)
+    }
+}
+
+
 #[derive(Copy,Clone,Debug,PartialEq,Eq)]
 pub enum EventSourceEnabled {
     Off,
@@ -182,14 +231,12 @@ impl<'e> Event {
         Ok(exit_code)
     }
 
-    pub fn add_time<'z, 's, F>(&'z mut self, clock: EventClock, usec: time::Duration, accuracy: time::Duration, callback: F) -> Result<TimeEventSource<'s>, Error>
-        where 'e: 'z, 'e: 's, F: 's + FnMut(time::Duration) -> i32
+    pub fn add_time<'z, 's, EC, F>(&'z mut self, usec: EC, accuracy: time::Duration, callback: F) -> Result<TimeEventSource<'s, EC>, Error>
+        where 'e: 'z, 'e: 's,
+            EC: EventClockTimestamp,
+            F: 's + FnMut(EC) -> i32
     {
-        let usec = match usec.num_microseconds() {
-            None => return Err(Error::from_negative_errno(-EINVAL)),
-            Some(usec) if usec < 0 => return Err(Error::from_negative_errno(-EINVAL)),
-            Some(usec) => usec,
-        };
+        let (clock, usec) = (EC::clock(), usec.usec());
         let accuracy = match accuracy.num_microseconds() {
             None => return Err(Error::from_negative_errno(-EINVAL)),
             Some(accuracy) if accuracy < 0 => return Err(Error::from_negative_errno(-EINVAL)),
@@ -199,21 +246,23 @@ impl<'e> Event {
         let callback = Box::new(callback);
         let userdata = &*callback as *const _ as *const libc::c_void;
 
-        extern fn event_source_time_tramp<F>(_: ffi::sd_event_source, usec: libc::uint64_t, userdata: *const libc::c_void) -> libc::c_int
-            where F: FnMut(time::Duration) -> i32
+        extern fn event_source_time_tramp<EC, F>(_: ffi::sd_event_source, usec: libc::uint64_t, userdata: *const libc::c_void) -> libc::c_int
+            where EC: EventClockTimestamp, F: FnMut(EC) -> i32
         {
             let cb_ptr = userdata as *mut F;
             let cb: &mut F = unsafe { &mut *cb_ptr };
-            (*cb)(time::Duration::microseconds(usec as i64)) as libc::c_int
+            let usec = EC::from_usec(usec as u64);
+            (*cb)(usec) as libc::c_int
         }
 
         let mut s: ffi::sd_event_source = 0 as ffi::sd_event_source;
-        let rv = unsafe { ffi::sd_event_add_time(self.e, &mut s, clock.into_raw(), usec as libc::uint64_t, accuracy as libc::uint64_t, event_source_time_tramp::<F>, userdata) };
+        let rv = unsafe { ffi::sd_event_add_time(self.e, &mut s, clock.into_raw(), usec as libc::uint64_t, accuracy as libc::uint64_t, event_source_time_tramp::<EC, F>, userdata) };
         if rv < 0 {
             return Err(Error::from_negative_errno(rv))
         }
         Ok(TimeEventSource {
             _e: std::marker::PhantomData,
+            _ec: std::marker::PhantomData,
             s: s,
             cb: callback,
         })
@@ -323,7 +372,8 @@ impl<'e> Event {
         Ok(())
     }
 
-    pub fn now(&'e self, clock: EventClock) -> Result<time::Duration, Error> {
+    pub fn now<EC: EventClockTimestamp = MonotonicEventClockTimestamp>(&'e self) -> Result<EC, Error> {
+        let clock = EC::clock();
         let mut usec: libc::uint64_t = 0;
         let rv = unsafe {
             ffi::sd_event_now(self.e, clock.into_raw(), &mut usec)
@@ -331,7 +381,7 @@ impl<'e> Event {
         if rv < 0 {
             return Err(Error::from_negative_errno(rv))
         }
-        Ok(time::Duration::microseconds(usec as i64))
+        Ok(EC::from_usec(usec as u64))
     }
 }
 
@@ -361,19 +411,20 @@ pub trait EventSource {
 }
 
 
-pub struct TimeEventSource<'e> {
+pub struct TimeEventSource<'e, EC> {
     _e: std::marker::PhantomData<&'e Event>,
+    _ec: std::marker::PhantomData<EC>,
     s: ffi::sd_event_source,
-    #[allow(dead_code)] cb: Box<FnMut(time::Duration) -> i32 + 'e>,
+    #[allow(dead_code)] cb: Box<FnMut(EC) -> i32 + 'e>,
 }
 
-impl<'e> std::fmt::Debug for TimeEventSource<'e> {
+impl<'e, EC> std::fmt::Debug for TimeEventSource<'e, EC> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         f.write_str("timeeventsource")
     }
 }
 
-impl<'e> std::ops::Drop for TimeEventSource<'e> {
+impl<'e, EC> std::ops::Drop for TimeEventSource<'e, EC> {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_source_unref(self.s);
@@ -381,14 +432,14 @@ impl<'e> std::ops::Drop for TimeEventSource<'e> {
     }
 }
 
-impl<'e> EventSource for TimeEventSource<'e> {
+impl<'e, EC> EventSource for TimeEventSource<'e, EC> {
     fn as_raw(&self) -> ffi::sd_event_source {
         self.s
     }
 }
 
-impl<'e> TimeEventSource<'e> {
-    pub fn time(&self) -> Result<time::Duration, Error> {
+impl<'e, EC: EventClockTimestamp> TimeEventSource<'e, EC> {
+    pub fn time(&self) -> Result<EC, Error> {
         let mut usec: libc::uint64_t = 0;
         let rv = unsafe {
             ffi::sd_event_source_get_time(self.s, &mut usec)
@@ -396,15 +447,10 @@ impl<'e> TimeEventSource<'e> {
         if rv < 0 {
             return Err(Error::from_negative_errno(rv))
         }
-        Ok(time::Duration::microseconds(usec as i64))
+        Ok(EC::from_usec(usec as u64))
     }
-    pub fn set_time(&self, usec: time::Duration) -> Result<(), Error> {
-        let usec = match usec.num_microseconds() {
-            None => return Err(Error::from_negative_errno(-EINVAL)),
-            Some(usec) if usec < 0 => return Err(Error::from_negative_errno(-EINVAL)),
-            Some(usec) => usec,
-        };
-
+    pub fn set_time(&self, usec: EC) -> Result<(), Error> {
+        let usec = usec.usec();
         let rv = unsafe {
             ffi::sd_event_source_set_time(self.s, usec as libc::uint64_t)
         };

@@ -18,6 +18,9 @@ pub use event::{
     Event,
     EventState,
     EventClock,
+    EventClockTimestamp,
+    RealtimeEventClockTimestamp,
+    MonotonicEventClockTimestamp,
     EventSource,
     EventSourceEnabled,
     /*IoEventSource,*/
