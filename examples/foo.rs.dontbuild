@@ -1,0 +1,140 @@
+extern crate libsystemd;
+extern crate time;
+
+// use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::ops::DerefMut;
+use std::cell::RefCell;
+
+use time::Duration;
+
+use libsystemd::*;
+
+
+fn main() {
+    let exited = Arc::new(Mutex::new(false));
+    // let mut z: Option<EventSource> = None;
+    let mut e = RefCell::new(Event::default());
+    // let e = Event::default();
+    println!("e: {:?}", e);
+    // {
+        // let p: EventSource = e.add_post(|| { println!("post thing called!"); 0 }).unwrap();
+        // println!("p: {:?}", p);
+        // let xc = || { println!("exit thing called!"); 0 };
+        // let x: EventSource = e.add_exit(xc).unwrap();
+        // println!("x: {:?}", x);
+        let mut dcx = exited.clone();
+        let dc = move || {
+            println!("deferred thing called!");
+            println!("a");
+            // e.exit(42);
+            // let mut bleh = dcx.lock().unwrap();
+            // *bleh = true;
+            // dcx.lock();
+            // let mut guard = match dcx.lock() {
+            //     Ok(guard) => guard,
+            //     Err(poisoned) => poisoned.into_inner(),
+            // };
+            // let mut exited = exited.lock().unwrap();
+            // *exited  = true;
+            println!("e: {:p}", dcx);
+            println!("b");
+            0
+        };
+        let s = e.borrow_mut().add_defer(dc).unwrap();
+        // let s: EventSource = e.add_defer(&|| {
+        //     println!("deferred thing called!");
+        //     println!("a");
+        //     // e.exit(42);
+        //     let mut bleh = dcx.lock().unwrap();
+        //     *bleh = true;
+        //     // dcx.lock();
+        //     // let mut guard = match dcx.lock() {
+        //     //     Ok(guard) => guard,
+        //     //     Err(poisoned) => poisoned.into_inner(),
+        //     // };
+     //        // let mut exited = exited.lock().unwrap();
+     //        // *exited  = true;
+        //     println!("e: {:p}", dcx);
+        //     println!("b");
+        //     0
+        // }).unwrap();
+        // let _ = s;
+        // let _ = dc;
+        // drop(s);
+        // drop(dc);
+        // println!("s: {:?}", s);
+        // let e2 = e.clone();
+        let t: Rc<RefCell<Option<TimeEventSource>>> = Rc::new(RefCell::new(None));
+        let t1 = t.clone();
+        // let now = e.now(EventClock::Monotonic).unwrap();
+        let e2 = e.clone();
+        let mut n = 0;
+        (*t.borrow_mut()) = e.borrow_mut().add_time(EventClock::Monotonic, Duration::seconds(3), Duration::seconds(1), move |d| {
+            println!("time thing called! ({:?}", d);
+            // s.set_enabled(EventSourceEnabled::Off);
+            match *t1.borrow() {
+                Some(ref s) => {
+                    s.set_time(e2.borrow_mut().now(EventClock::Monotonic).unwrap() + Duration::seconds(4));
+                    s.set_enabled(EventSourceEnabled::OneShot);
+                    ()
+                },
+                None => (),
+            }
+            n += 1;
+            if n > 5 {
+                e2.borrow_mut().exit(26);
+            }
+            0
+        }).ok();
+        println!("t: {:?}", t);
+        // let t2: EventSource = e.add_time(EventClock::Monotonic, Duration::seconds(5), Duration::seconds(1), |d| { println!("c"); println!("d"); 0 }).unwrap();
+        // println!("t2: {:?}", t2);
+        // t.set_enabled(EventSourceEnabled::On);
+        // z = Some(t);
+        // let _ = s;
+        // e.run_loop();
+        e.borrow_mut().run(time::Duration::milliseconds(1));
+        let ss = foo(&mut e.borrow_mut());
+        // let ss2 = foo(&mut e);
+
+        e.borrow_mut().run_loop();
+
+        let ec = e.borrow().exit_code();
+        println!("exit_code: {:?}", ec);
+
+        // loop {
+        //     if *exited.lock().unwrap() {
+        //         break;
+        //     }
+        //     let cancontinue = match e.run(time::Duration::seconds(2)) {
+        //         Ok(cancontinue) => cancontinue,
+        //         Err(ref error) => {
+        //             println!("error running loop: {:?}", error);
+        //             break;
+        //         },
+        //     };
+        //     println!("cancontinue: {:?}", cancontinue);
+        //     if !cancontinue {
+        //         break;
+        //     }
+        // }
+    // }
+    // let _ = e;
+    // drop(e);
+    // let a = s;
+    // drop(a);
+    // drop(z.unwrap());
+    // let _ = e;
+}
+
+fn foo<'e, 's>(e: &'e mut Event) -> TimeEventSource<'s> {
+    // let _ = e;
+    let s = "foobarbazgen";
+    let now = e.now(EventClock::Monotonic).unwrap();
+    e.add_time(EventClock::Monotonic, now + Duration::seconds(19), Duration::seconds(1), move |d| {
+        println!("time thing called! {:?}, {:?}", d, s);
+        0
+    }).unwrap()
+}
