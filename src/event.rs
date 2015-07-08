@@ -5,8 +5,13 @@ use std;
 // use std::ops::Range;
 // use std::os::unix::io::RawFd;
 use time;
+use signalfd;
 
 use {ffi, Error};
+
+// mod event_timestamp;
+use clock::*;
+
 
 #[derive(Copy,Clone,Debug,PartialEq,Eq)]
 pub enum EventState {
@@ -47,80 +52,6 @@ impl EventState {
             EventState::Finished => ffi::LIBSYSTEMD_SYS__SD_EVENT_FINISHED,
             EventState::Unknown(r) => r as libc::c_int,
         }
-    }
-}
-
-#[derive(Copy,Clone,Debug)]
-pub enum EventClock {
-    Realtime,
-    Monotonic,
-    BoottimeAlarm,
-    Unknown(i32),
-}
-impl EventClock {
-    fn from_raw(r: ffi::clockid_t) -> EventClock {
-        match r {
-            ffi::CLOCK_REALTIME => EventClock::Realtime,
-            ffi::CLOCK_MONOTONIC => EventClock::Monotonic,
-            ffi::CLOCK_BOOTTIME_ALARM => EventClock::BoottimeAlarm,
-            r => EventClock::Unknown(r),
-        }
-    }
-    fn into_raw(self) -> ffi::clockid_t {
-        match self {
-            EventClock::Realtime => ffi::CLOCK_REALTIME,
-            EventClock::Monotonic => ffi::CLOCK_MONOTONIC,
-            EventClock::BoottimeAlarm => ffi::CLOCK_BOOTTIME_ALARM,
-            EventClock::Unknown(r) => r as ffi::clockid_t,
-        }
-    }
-}
-
-pub trait EventClockTimestamp {
-    fn clock() -> EventClock;
-    fn from_usec(usec: u64) -> Self;
-    fn usec(&self) -> u64;
-}
-
-#[derive(Copy,Clone,Debug,PartialEq,Eq,PartialOrd,Ord)]
-pub struct RealtimeEventClockTimestamp(u64);
-impl EventClockTimestamp for RealtimeEventClockTimestamp {
-    fn clock() -> EventClock { EventClock::Realtime }
-    fn from_usec(usec: u64) -> RealtimeEventClockTimestamp {
-        RealtimeEventClockTimestamp(usec)
-    }
-    fn usec(&self) -> u64 { self.0 }
-}
-
-impl std::ops::Add<time::Duration> for RealtimeEventClockTimestamp {
-    type Output = RealtimeEventClockTimestamp;
-    fn add(self, rhs: time::Duration) -> RealtimeEventClockTimestamp {
-        let rhs_usec = match rhs.num_microseconds() {
-            None => panic!(),
-            Some(usec) => usec,
-        };
-        RealtimeEventClockTimestamp(((self.0 as i64) + rhs_usec) as u64)
-    }
-}
-
-#[derive(Copy,Clone,Debug,PartialEq,Eq,PartialOrd,Ord)]
-pub struct MonotonicEventClockTimestamp(u64);
-impl EventClockTimestamp for MonotonicEventClockTimestamp {
-    fn clock() -> EventClock { EventClock::Monotonic }
-    fn from_usec(usec: u64) -> MonotonicEventClockTimestamp {
-        MonotonicEventClockTimestamp(usec)
-    }
-    fn usec(&self) -> u64 { self.0 }
-}
-
-impl std::ops::Add<time::Duration> for MonotonicEventClockTimestamp {
-    type Output = MonotonicEventClockTimestamp;
-    fn add(self, rhs: time::Duration) -> MonotonicEventClockTimestamp {
-        let rhs_usec = match rhs.num_microseconds() {
-            None => panic!(),
-            Some(usec) => usec,
-        };
-        MonotonicEventClockTimestamp(((self.0 as i64) + rhs_usec) as u64)
     }
 }
 
@@ -178,19 +109,6 @@ pub struct Event {
     e: ffi::sd_event,
 }
 
-impl Default for Event {
-    fn default() -> Event {
-        let mut e: ffi::sd_event = 0 as ffi::sd_event;
-        let rv = unsafe { ffi::sd_event_default(&mut e) };
-        if rv < 0 {
-            panic!("sd_event_default() failed");
-        }
-        Event {
-            e: e,
-        }
-    }
-}
-
 impl Clone for Event {
     fn clone(&self) -> Event {
         Event {
@@ -209,6 +127,32 @@ impl std::ops::Drop for Event {
 
 
 impl<'e> Event {
+    pub fn new() -> Result<Event, Error> {
+        let mut e: ffi::sd_event = 0 as ffi::sd_event;
+        let rv = unsafe { ffi::sd_event_new(&mut e) };
+        if rv < 0 {
+            return Err(Error::from_negative_errno(rv))
+        }
+        Ok(Event {
+            e: e,
+        })
+    }
+
+    pub fn default() -> Result<Event, Error> {
+        let mut e: ffi::sd_event = 0 as ffi::sd_event;
+        let rv = unsafe { ffi::sd_event_default(&mut e) };
+        if rv < 0 {
+            return Err(Error::from_negative_errno(rv))
+        }
+        Ok(Event {
+            e: e,
+        })
+    }
+
+    pub fn as_ptr(&self) -> *const ffi::sd_event {
+        &self.e
+    }
+
     pub fn state(&'e self) -> EventState {
         let state = unsafe { ffi::sd_event_get_state(self.e) };
         EventState::from_raw(state)
@@ -231,12 +175,41 @@ impl<'e> Event {
         Ok(exit_code)
     }
 
+    // pub fn sd_event_add_io(e: sd_event, s: *mut sd_event_source, fd: libc::c_int, events: libc::uint32_t, callback: sd_event_io_handler_t, userdata: *const libc::c_void) -> libc::c_int;
+    // pub type sd_event_io_handler_t = extern fn(/* s */ sd_event_source, /* fd */ libc::c_int, /* revents */ libc::uint32_t, /* userdata */ *const libc::c_void) -> libc::c_int;
+
+    pub fn add_io<'z, 's, F>(&'z mut self, fd: std::os::unix::io::RawFd, events: IoEventTriggering, callback: F) -> Result<IoEventSource<'s>, Error>
+        where 'e: 'z, 'e: 's, F: 's + FnMut(std::os::unix::io::RawFd, IoEventMask) -> i32
+    {
+        let callback = Box::new(callback);
+        let userdata = &*callback as *const _ as *const libc::c_void;
+
+        extern fn event_source_io_tramp<F>(_: ffi::sd_event_source, fd: libc::c_int, revents: libc::uint32_t, userdata: *const libc::c_void) -> libc::c_int
+            where F: FnMut(std::os::unix::io::RawFd, IoEventMask) -> i32
+        {
+            let cb_ptr = userdata as *mut F;
+            let cb: &mut F = unsafe { &mut *cb_ptr };
+            (*cb)(fd, revents.into()) as libc::c_int
+        }
+
+        let mut s: ffi::sd_event_source = 0 as ffi::sd_event_source;
+        let rv = unsafe { ffi::sd_event_add_io(self.e, &mut s, fd, events.into(), event_source_io_tramp::<F>, userdata) };
+        if rv < 0 {
+            return Err(Error::from_negative_errno(rv))
+        }
+        Ok(IoEventSource {
+            _e: std::marker::PhantomData,
+            s: s,
+            cb: callback,
+        })
+    }
+
     pub fn add_time<'z, 's, EC, F>(&'z mut self, usec: EC, accuracy: time::Duration, callback: F) -> Result<TimeEventSource<'s, EC>, Error>
         where 'e: 'z, 'e: 's,
-            EC: EventClockTimestamp,
+            EC: ClockTimestamp,
             F: 's + FnMut(EC) -> i32
     {
-        let (clock, usec) = (EC::clock(), usec.usec());
+        let (clock, usec) = (EC::clock(), usec.as_usec());
         let accuracy = match accuracy.num_microseconds() {
             None => return Err(Error::from_negative_errno(-EINVAL)),
             Some(accuracy) if accuracy < 0 => return Err(Error::from_negative_errno(-EINVAL)),
@@ -247,7 +220,7 @@ impl<'e> Event {
         let userdata = &*callback as *const _ as *const libc::c_void;
 
         extern fn event_source_time_tramp<EC, F>(_: ffi::sd_event_source, usec: libc::uint64_t, userdata: *const libc::c_void) -> libc::c_int
-            where EC: EventClockTimestamp, F: FnMut(EC) -> i32
+            where EC: ClockTimestamp, F: FnMut(EC) -> i32
         {
             let cb_ptr = userdata as *mut F;
             let cb: &mut F = unsafe { &mut *cb_ptr };
@@ -263,6 +236,33 @@ impl<'e> Event {
         Ok(TimeEventSource {
             _e: std::marker::PhantomData,
             _ec: std::marker::PhantomData,
+            s: s,
+            cb: callback,
+        })
+    }
+
+    pub fn add_signal<'z, 's, F>(&'z mut self, signal: i32, callback: F) -> Result<SignalEventSource<'s>, Error>
+        where 'e: 'z, 'e: 's, F: 's + FnMut(signalfd::SignalfdSigInfo) -> i32
+    {
+        let callback = Box::new(callback);
+        let userdata = &*callback as *const _ as *const libc::c_void;
+
+        extern fn event_source_signal_tramp<F>(_: ffi::sd_event_source, si: *const signalfd::sys::signalfd_siginfo, userdata: *const libc::c_void) -> libc::c_int
+            where F: FnMut(signalfd::SignalfdSigInfo) -> i32
+        {
+            let cb_ptr = userdata as *mut F;
+            let cb: &mut F = unsafe { &mut *cb_ptr };
+            let si: signalfd::sys::signalfd_siginfo = unsafe { *si };
+            (*cb)(si.into()) as libc::c_int
+        }
+
+        let mut s: ffi::sd_event_source = 0 as ffi::sd_event_source;
+        let rv = unsafe { ffi::sd_event_add_signal(self.e, &mut s, signal, event_source_signal_tramp::<F>, userdata) };
+        if rv < 0 {
+            return Err(Error::from_negative_errno(rv))
+        }
+        Ok(SignalEventSource {
+            _e: std::marker::PhantomData,
             s: s,
             cb: callback,
         })
@@ -372,7 +372,7 @@ impl<'e> Event {
         Ok(())
     }
 
-    pub fn now<EC: EventClockTimestamp = MonotonicEventClockTimestamp>(&'e self) -> Result<EC, Error> {
+    pub fn now<EC: ClockTimestamp = MonotonicClockTimestamp>(&'e self) -> Result<EC, Error> {
         let clock = EC::clock();
         let mut usec: libc::uint64_t = 0;
         let rv = unsafe {
@@ -410,6 +410,160 @@ pub trait EventSource {
     }
 }
 
+//EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLPRI //|EPOLLERR|EPOLLHUP|EPOLLET
+#[derive(Copy,Clone,Debug)]
+pub struct IoEventMask(u32);
+impl IoEventMask {
+    pub fn new() -> IoEventMask {
+        IoEventMask(0)
+    }
+    pub fn builder() -> IoEventMaskBuilder {
+        IoEventMaskBuilder(0)
+    }
+    pub fn set_epollin(&mut self, v: bool) {
+        if v {
+            self.0 = self.0 | ffi::EPOLLIN
+        } else {
+            self.0 = self.0 & (0u32 ^ ffi::EPOLLIN)
+        };
+    }
+    pub fn set_epollout(&mut self, v: bool) {
+        if v {
+            self.0 = self.0 | ffi::EPOLLOUT
+        } else {
+            self.0 = self.0 & (0u32 ^ ffi::EPOLLOUT)
+        };
+    }
+    pub fn set_epollrdhup(&mut self, v: bool) {
+        if v {
+            self.0 = self.0 | ffi::EPOLLRDHUP
+        } else {
+            self.0 = self.0 & (0u32 ^ ffi::EPOLLRDHUP)
+        };
+    }
+    pub fn set_epollpri(&mut self, v: bool) {
+        if v {
+            self.0 = self.0 | ffi::EPOLLPRI
+        } else {
+            self.0 = self.0 & (0u32 ^ ffi::EPOLLPRI)
+        };
+    }
+}
+impl From<libc::uint32_t> for IoEventMask {
+    fn from(e: libc::uint32_t) -> IoEventMask {
+        IoEventMask(e)
+    }
+}
+impl From<IoEventMask> for libc::uint32_t {
+    fn from(e: IoEventMask) -> libc::uint32_t {
+        e.0
+    }
+}
+
+#[derive(Copy,Clone,Debug)]
+pub struct IoEventMaskBuilder(u32);
+impl IoEventMaskBuilder {
+    pub fn set_epollin(mut self, v: bool) -> IoEventMaskBuilder {
+        if v {
+            self.0 = self.0 | ffi::EPOLLIN
+        } else {
+            self.0 = self.0 & (0u32 ^ ffi::EPOLLIN)
+        }
+        self
+    }
+    pub fn set_epollout(mut self, v: bool) -> IoEventMaskBuilder {
+        if v {
+            self.0 = self.0 | ffi::EPOLLOUT
+        } else {
+            self.0 = self.0 & (0u32 ^ ffi::EPOLLOUT)
+        }
+        self
+    }
+    pub fn set_epollrdhup(mut self, v: bool) -> IoEventMaskBuilder {
+        if v {
+            self.0 = self.0 | ffi::EPOLLRDHUP
+        } else {
+            self.0 = self.0 & (0u32 ^ ffi::EPOLLRDHUP)
+        }
+        self
+    }
+    pub fn set_epollpri(mut self, v: bool) -> IoEventMaskBuilder {
+        if v {
+            self.0 = self.0 | ffi::EPOLLPRI
+        } else {
+            self.0 = self.0 & (0u32 ^ ffi::EPOLLPRI)
+        };
+        self
+    }
+    pub fn build(self) -> IoEventMask {
+        IoEventMask(self.0)
+    }
+}
+
+impl From<IoEventMaskBuilder> for IoEventMask {
+    fn from(builder: IoEventMaskBuilder) -> IoEventMask {
+        builder.build()
+    }
+}
+
+pub enum IoEventTriggering {
+    LevelTriggered(IoEventMask),
+    EdgeTriggered(IoEventMask),
+}
+
+impl From<IoEventTriggering> for libc::uint32_t {
+    fn from(e: IoEventTriggering) -> libc::uint32_t {
+        let mut mask: libc::uint32_t = 0;
+        match e {
+            IoEventTriggering::LevelTriggered(e) => mask = e.into(),
+            IoEventTriggering::EdgeTriggered(e) => {
+                mask = e.into();
+                mask = mask | ffi::EPOLLET;
+            }
+        };
+        mask
+    }
+}
+
+pub struct IoEventSource<'e> {
+    _e: std::marker::PhantomData<&'e Event>,
+    s: ffi::sd_event_source,
+    #[allow(dead_code)] cb: Box<FnMut(std::os::unix::io::RawFd, IoEventMask) -> i32 + 'e>,
+}
+
+impl<'e> std::fmt::Debug for IoEventSource<'e> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "IoEventSource{{ s: {:?} }}", self.s)
+    }
+}
+
+impl<'e> std::ops::Drop for IoEventSource<'e> {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::sd_event_source_unref(self.s);
+        }
+    }
+}
+
+impl<'e> EventSource for IoEventSource<'e> {
+    fn as_raw(&self) -> ffi::sd_event_source {
+        self.s
+    }
+}
+
+impl<'e> IoEventSource<'e> {
+    // pub fn signal(&self) -> Result<i32, Error> {
+    //     let mut signal: libc::c_int = 0;
+    //     let rv = unsafe {
+    //         ffi::sd_event_source_get_signal(self.s, &mut signal)
+    //     };
+    //     if rv < 0 {
+    //         return Err(Error::from_negative_errno(rv))
+    //     }
+    //     Ok(signal)
+    // }
+}
+
 
 pub struct TimeEventSource<'e, EC> {
     _e: std::marker::PhantomData<&'e Event>,
@@ -438,7 +592,7 @@ impl<'e, EC> EventSource for TimeEventSource<'e, EC> {
     }
 }
 
-impl<'e, EC: EventClockTimestamp> TimeEventSource<'e, EC> {
+impl<'e, EC: ClockTimestamp> TimeEventSource<'e, EC> {
     pub fn time(&self) -> Result<EC, Error> {
         let mut usec: libc::uint64_t = 0;
         let rv = unsafe {
@@ -450,7 +604,7 @@ impl<'e, EC: EventClockTimestamp> TimeEventSource<'e, EC> {
         Ok(EC::from_usec(usec as u64))
     }
     pub fn set_time(&self, usec: EC) -> Result<(), Error> {
-        let usec = usec.usec();
+        let usec = usec.as_usec();
         let rv = unsafe {
             ffi::sd_event_source_set_time(self.s, usec as libc::uint64_t)
         };
@@ -486,7 +640,7 @@ impl<'e, EC: EventClockTimestamp> TimeEventSource<'e, EC> {
         Ok(())
     }
 
-    pub fn clock(&self) -> Result<EventClock, Error> {
+    pub fn clock(&self) -> Result<Clock, Error> {
         let mut clock: ffi::clockid_t = 0;
         let rv = unsafe {
             ffi::sd_event_source_get_time_clock(self.s, &mut clock)
@@ -494,7 +648,46 @@ impl<'e, EC: EventClockTimestamp> TimeEventSource<'e, EC> {
         if rv < 0 {
             return Err(Error::from_negative_errno(rv))
         }
-        Ok(EventClock::from_raw(clock))
+        Ok(Clock::from_raw(clock))
+    }
+}
+
+
+pub struct SignalEventSource<'e> {
+    _e: std::marker::PhantomData<&'e Event>,
+    s: ffi::sd_event_source,
+    #[allow(dead_code)] cb: Box<FnMut(signalfd::SignalfdSigInfo) -> i32 + 'e>,
+}
+
+impl<'e> std::fmt::Debug for SignalEventSource<'e> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        write!(f, "SignalEventSource{{ s: {:?} }}", self.s)
+    }
+}
+
+impl<'e> std::ops::Drop for SignalEventSource<'e> {
+    fn drop(&mut self) {
+        unsafe {
+            ffi::sd_event_source_unref(self.s);
+        }
+    }
+}
+
+impl<'e> EventSource for SignalEventSource<'e> {
+    fn as_raw(&self) -> ffi::sd_event_source {
+        self.s
+    }
+}
+
+impl<'e> SignalEventSource<'e> {
+    pub fn signal(&self) -> Result<i32, Error> {
+        let rv = unsafe {
+            ffi::sd_event_source_get_signal(self.s)
+        };
+        if rv < 0 {
+            return Err(Error::from_negative_errno(rv))
+        }
+        Ok(rv)
     }
 }
 
@@ -525,6 +718,7 @@ impl<'e> EventSource for DeferEventSource<'e> {
     }
 }
 
+
 pub struct PostEventSource<'e> {
     _e: std::marker::PhantomData<&'e Event>,
     s: ffi::sd_event_source,
@@ -550,6 +744,7 @@ impl<'e> EventSource for PostEventSource<'e> {
         self.s
     }
 }
+
 
 pub struct ExitEventSource<'e> {
     _e: std::marker::PhantomData<&'e Event>,
@@ -585,13 +780,13 @@ mod test {
 
     #[test]
     pub fn test_smoke() {
-        let e: Event = Default::default();
+        let e: Event = Event::new().unwrap();
         println!("{:?}", e);
     }
 
     #[test]
     pub fn test_event_add_defer() {
-        let mut e: Event = Default::default();
+        let mut e: Event = Event::new().unwrap();
         let s: DeferEventSource = e.add_defer(move || 0 ).unwrap();
         let cancontinue = e.run(time::Duration::milliseconds(5)).unwrap();
         assert_eq!(cancontinue, true);

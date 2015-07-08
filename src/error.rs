@@ -12,6 +12,9 @@ impl Error {
     pub fn from_negative_errno(errno: libc::c_int) -> Error {
         Error::Io(std::io::Error::from_raw_os_error(-errno))
     }
+    pub fn last_os_error() -> Error {
+        Error::Io(std::io::Error::last_os_error())
+    }
 }
 
 impl std::fmt::Display for Error {

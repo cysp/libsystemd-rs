@@ -68,15 +68,15 @@ fn main() {
         // let e2 = e.clone();
         let t: Rc<RefCell<Option<TimeEventSource>>> = Rc::new(RefCell::new(None));
         let t1 = t.clone();
-        // let now = e.now(EventClock::Monotonic).unwrap();
+        // let now = e.now(Clock::Monotonic).unwrap();
         let e2 = e.clone();
         let mut n = 0;
-        (*t.borrow_mut()) = e.borrow_mut().add_time(EventClock::Monotonic, Duration::seconds(3), Duration::seconds(1), move |d| {
+        (*t.borrow_mut()) = e.borrow_mut().add_time(Clock::Monotonic, Duration::seconds(3), Duration::seconds(1), move |d| {
             println!("time thing called! ({:?}", d);
             // s.set_enabled(EventSourceEnabled::Off);
             match *t1.borrow() {
                 Some(ref s) => {
-                    s.set_time(e2.borrow_mut().now(EventClock::Monotonic).unwrap() + Duration::seconds(4));
+                    s.set_time(e2.borrow_mut().now(Clock::Monotonic).unwrap() + Duration::seconds(4));
                     s.set_enabled(EventSourceEnabled::OneShot);
                     ()
                 },
@@ -89,7 +89,7 @@ fn main() {
             0
         }).ok();
         println!("t: {:?}", t);
-        // let t2: EventSource = e.add_time(EventClock::Monotonic, Duration::seconds(5), Duration::seconds(1), |d| { println!("c"); println!("d"); 0 }).unwrap();
+        // let t2: EventSource = e.add_time(Clock::Monotonic, Duration::seconds(5), Duration::seconds(1), |d| { println!("c"); println!("d"); 0 }).unwrap();
         // println!("t2: {:?}", t2);
         // t.set_enabled(EventSourceEnabled::On);
         // z = Some(t);
@@ -132,8 +132,8 @@ fn main() {
 fn foo<'e, 's>(e: &'e mut Event) -> TimeEventSource<'s> {
     // let _ = e;
     let s = "foobarbazgen";
-    let now = e.now(EventClock::Monotonic).unwrap();
-    e.add_time(EventClock::Monotonic, now + Duration::seconds(19), Duration::seconds(1), move |d| {
+    let now = e.now(Clock::Monotonic).unwrap();
+    e.add_time(Clock::Monotonic, now + Duration::seconds(19), Duration::seconds(1), move |d| {
         println!("time thing called! {:?}, {:?}", d, s);
         0
     }).unwrap()
