@@ -78,12 +78,6 @@ fn main() {
         0
     }).ok();
 
-    let io1events = IoEventMask::builder().set_epollin(true).build();
-    let io1 = e.add_io(0, IoEventTriggering::LevelTriggered(io1events), move |fd, revents| {
-        println!("io1 called for fd: {}, revents: {:#?}", fd, revents);
-        0
-    }).unwrap();
-
     let _ = e.run_loop();
 
     // let _ = (s1, t1);

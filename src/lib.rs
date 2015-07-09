@@ -1,3 +1,4 @@
+#![feature(convert)]
 //! Bindings for libsystemd's event subsystem
 
 extern crate libc;
@@ -38,7 +39,7 @@ pub use event::{
     EventSourceEnabled,
     IoEventSource,
     TimeEventSource,
-    /*SignalEventSource,*/
+    SignalEventSource,
     /*ChildEventSource,*/
     DeferEventSource,
     PostEventSource,

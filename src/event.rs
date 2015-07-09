@@ -178,28 +178,31 @@ impl<'e> Event {
     // pub fn sd_event_add_io(e: sd_event, s: *mut sd_event_source, fd: libc::c_int, events: libc::uint32_t, callback: sd_event_io_handler_t, userdata: *const libc::c_void) -> libc::c_int;
     // pub type sd_event_io_handler_t = extern fn(/* s */ sd_event_source, /* fd */ libc::c_int, /* revents */ libc::uint32_t, /* userdata */ *const libc::c_void) -> libc::c_int;
 
-    pub fn add_io<'z, 's, F>(&'z mut self, fd: std::os::unix::io::RawFd, events: IoEventTriggering, callback: F) -> Result<IoEventSource<'s>, Error>
-        where 'e: 'z, 'e: 's, F: 's + FnMut(std::os::unix::io::RawFd, IoEventMask) -> i32
+    pub fn add_io<'z, 's, FD, F>(&'z mut self, fd: FD, events: IoEventTriggering, callback: F) -> Result<IoEventSource<'s, FD>, Error>
+        where 'e: 'z, 'e: 's,
+            FD: std::os::unix::io::AsRawFd,
+            F: 's + FnMut(IoEventMask) -> i32
     {
         let callback = Box::new(callback);
         let userdata = &*callback as *const _ as *const libc::c_void;
 
         extern fn event_source_io_tramp<F>(_: ffi::sd_event_source, fd: libc::c_int, revents: libc::uint32_t, userdata: *const libc::c_void) -> libc::c_int
-            where F: FnMut(std::os::unix::io::RawFd, IoEventMask) -> i32
+            where F: FnMut(IoEventMask) -> i32
         {
             let cb_ptr = userdata as *mut F;
             let cb: &mut F = unsafe { &mut *cb_ptr };
-            (*cb)(fd, revents.into()) as libc::c_int
+            (*cb)(revents.into()) as libc::c_int
         }
 
         let mut s: ffi::sd_event_source = 0 as ffi::sd_event_source;
-        let rv = unsafe { ffi::sd_event_add_io(self.e, &mut s, fd, events.into(), event_source_io_tramp::<F>, userdata) };
+        let rv = unsafe { ffi::sd_event_add_io(self.e, &mut s, fd.as_raw_fd(), events.into(), event_source_io_tramp::<F>, userdata) };
         if rv < 0 {
             return Err(Error::from_negative_errno(rv))
         }
         Ok(IoEventSource {
             _e: std::marker::PhantomData,
             s: s,
+            fd: fd,
             cb: callback,
         })
     }
@@ -410,15 +413,17 @@ pub trait EventSource {
     }
 }
 
-//EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLPRI //|EPOLLERR|EPOLLHUP|EPOLLET
-#[derive(Copy,Clone,Debug)]
+#[derive(Copy,Clone)]
 pub struct IoEventMask(u32);
 impl IoEventMask {
     pub fn new() -> IoEventMask {
-        IoEventMask(0)
+        IoEventMask(ffi::EPOLLERR | ffi::EPOLLHUP)
     }
     pub fn builder() -> IoEventMaskBuilder {
-        IoEventMaskBuilder(0)
+        IoEventMaskBuilder(ffi::EPOLLERR | ffi::EPOLLHUP)
+    }
+    pub fn epollin(&self) -> bool {
+        (self.0 & ffi::EPOLLIN) != 0
     }
     pub fn set_epollin(&mut self, v: bool) {
         if v {
@@ -427,12 +432,18 @@ impl IoEventMask {
             self.0 = self.0 & (0u32 ^ ffi::EPOLLIN)
         };
     }
+    pub fn epollout(&self) -> bool {
+        (self.0 & ffi::EPOLLOUT) != 0
+    }
     pub fn set_epollout(&mut self, v: bool) {
         if v {
             self.0 = self.0 | ffi::EPOLLOUT
         } else {
             self.0 = self.0 & (0u32 ^ ffi::EPOLLOUT)
         };
+    }
+    pub fn epollrdhup(&self) -> bool {
+        (self.0 & ffi::EPOLLRDHUP) != 0
     }
     pub fn set_epollrdhup(&mut self, v: bool) {
         if v {
@@ -441,12 +452,21 @@ impl IoEventMask {
             self.0 = self.0 & (0u32 ^ ffi::EPOLLRDHUP)
         };
     }
+    pub fn epollpri(&self) -> bool {
+        (self.0 & ffi::EPOLLPRI) != 0
+    }
     pub fn set_epollpri(&mut self, v: bool) {
         if v {
             self.0 = self.0 | ffi::EPOLLPRI
         } else {
             self.0 = self.0 & (0u32 ^ ffi::EPOLLPRI)
         };
+    }
+    pub fn epollerr(&self) -> bool {
+        (self.0 & ffi::EPOLLERR) != 0
+    }
+    pub fn epollhup(&self) -> bool {
+        (self.0 & ffi::EPOLLHUP) != 0
     }
 }
 impl From<libc::uint32_t> for IoEventMask {
@@ -457,6 +477,31 @@ impl From<libc::uint32_t> for IoEventMask {
 impl From<IoEventMask> for libc::uint32_t {
     fn from(e: IoEventMask) -> libc::uint32_t {
         e.0
+    }
+}
+impl std::fmt::Debug for IoEventMask {
+    //EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLPRI //|EPOLLERR|EPOLLHUP|EPOLLET
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        let mut v: Vec<&'static str> = Vec::new();
+        if self.0 & ffi::EPOLLIN != 0 {
+            v.push("EPOLLIN");
+        }
+        if self.0 & ffi::EPOLLOUT != 0 {
+            v.push("EPOLLOUT");
+        }
+        if self.0 & ffi::EPOLLRDHUP != 0 {
+            v.push("EPOLLRDHUP");
+        }
+        if self.0 & ffi::EPOLLPRI != 0 {
+            v.push("EPOLLPRI");
+        }
+        if self.0 & ffi::EPOLLERR != 0 {
+            v.push("EPOLLERR");
+        }
+        if self.0 & ffi::EPOLLHUP != 0 {
+            v.push("EPOLLHUP");
+        }
+        write!(fmt, "IoEventMask({})", v.as_slice().connect("+"))
     }
 }
 
@@ -513,7 +558,7 @@ pub enum IoEventTriggering {
 
 impl From<IoEventTriggering> for libc::uint32_t {
     fn from(e: IoEventTriggering) -> libc::uint32_t {
-        let mut mask: libc::uint32_t = 0;
+        let mut mask: libc::uint32_t;
         match e {
             IoEventTriggering::LevelTriggered(e) => mask = e.into(),
             IoEventTriggering::EdgeTriggered(e) => {
@@ -525,19 +570,20 @@ impl From<IoEventTriggering> for libc::uint32_t {
     }
 }
 
-pub struct IoEventSource<'e> {
+pub struct IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
     _e: std::marker::PhantomData<&'e Event>,
     s: ffi::sd_event_source,
-    #[allow(dead_code)] cb: Box<FnMut(std::os::unix::io::RawFd, IoEventMask) -> i32 + 'e>,
+    fd: FD,
+    #[allow(dead_code)] cb: Box<FnMut(IoEventMask) -> i32 + 'e>,
 }
 
-impl<'e> std::fmt::Debug for IoEventSource<'e> {
+impl<'e, FD> std::fmt::Debug for IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "IoEventSource{{ s: {:?} }}", self.s)
     }
 }
 
-impl<'e> std::ops::Drop for IoEventSource<'e> {
+impl<'e, FD> std::ops::Drop for IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_source_unref(self.s);
@@ -545,13 +591,19 @@ impl<'e> std::ops::Drop for IoEventSource<'e> {
     }
 }
 
-impl<'e> EventSource for IoEventSource<'e> {
+impl<'e, FD> EventSource for IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
     fn as_raw(&self) -> ffi::sd_event_source {
         self.s
     }
 }
 
-impl<'e> IoEventSource<'e> {
+impl<'e, FD> IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
+    pub fn fd(&self) -> &FD {
+        &self.fd
+    }
+    pub fn fd_mut(&mut self) -> &mut FD {
+        &mut self.fd
+    }
     // pub fn signal(&self) -> Result<i32, Error> {
     //     let mut signal: libc::c_int = 0;
     //     let rv = unsafe {
