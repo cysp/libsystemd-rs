@@ -1,6 +1,10 @@
 use libc;
 use libc::consts::os::posix88::EINVAL;
 use std;
+use std::rc::Rc;
+// use std::sync::Arc;
+use std::cell::RefCell;
+use std::collections::HashSet;
 // use std::ffi::{CString};
 // use std::ops::Range;
 // use std::os::unix::io::RawFd;
@@ -104,20 +108,33 @@ mod event_source_enabled_tests {
 }
 
 
-#[derive(Debug)]
-pub struct Event {
+// #[derive(Debug)]
+pub struct Event<'s> {
     e: ffi::sd_event,
+    _s: std::marker::PhantomData<&'s ffi::sd_event>,
+    sources: Rc<RefCell<HashSet<Box<EventSource + 's>>>>,
 }
 
-impl Clone for Event {
-    fn clone(&self) -> Event {
+impl<'s> PartialEq for Event<'s> {
+    fn eq(&self, other: &Event) -> bool {
+        self.e == other.e
+    }
+}
+impl<'s> Eq for Event<'s> {
+}
+
+
+impl<'s> Clone for Event<'s> {
+    fn clone<'z>(&'z self) -> Event<'s> {
         Event {
             e: unsafe { ffi::sd_event_ref(self.e) },
+            _s: std::marker::PhantomData,
+            sources: self.sources.clone(),
         }
     }
 }
 
-impl std::ops::Drop for Event {
+impl<'s> std::ops::Drop for Event<'s> {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_unref(self.e);
@@ -126,30 +143,34 @@ impl std::ops::Drop for Event {
 }
 
 
-impl<'e> Event {
-    pub fn new() -> Result<Event, Error> {
+impl<'e, 's> Event<'s> {
+    pub fn new() -> Result<Event<'s>, Error> {
         let mut e: ffi::sd_event = 0 as ffi::sd_event;
         let rv = unsafe { ffi::sd_event_new(&mut e) };
         if rv < 0 {
             return Err(Error::from_negative_errno(rv))
         }
-        Ok(Event {
-            e: e,
-        })
+        Ok(Self::from_raw(e))
     }
 
-    pub fn default() -> Result<Event, Error> {
+    pub fn default() -> Result<Event<'s>, Error> {
         let mut e: ffi::sd_event = 0 as ffi::sd_event;
         let rv = unsafe { ffi::sd_event_default(&mut e) };
         if rv < 0 {
             return Err(Error::from_negative_errno(rv))
         }
-        Ok(Event {
-            e: e,
-        })
+        Ok(Self::from_raw(e))
     }
 
-    pub fn as_ptr(&self) -> *const ffi::sd_event {
+    fn from_raw<'z>(e: ffi::sd_event) -> Event<'z> {
+        Event::<'z> {
+            e: e,
+            _s: std::marker::PhantomData,
+            sources: Rc::new(RefCell::new(HashSet::new())),
+        }
+    }
+
+    pub fn as_ptr(&'e self) -> *const ffi::sd_event {
         &self.e
     }
 
@@ -178,10 +199,10 @@ impl<'e> Event {
     // pub fn sd_event_add_io(e: sd_event, s: *mut sd_event_source, fd: libc::c_int, events: libc::uint32_t, callback: sd_event_io_handler_t, userdata: *const libc::c_void) -> libc::c_int;
     // pub type sd_event_io_handler_t = extern fn(/* s */ sd_event_source, /* fd */ libc::c_int, /* revents */ libc::uint32_t, /* userdata */ *const libc::c_void) -> libc::c_int;
 
-    pub fn add_io<'z, 's, FD, F>(&'z mut self, fd: FD, events: IoEventTriggering, callback: F) -> Result<IoEventSource<'s, FD>, Error>
-        where 'e: 'z, 'e: 's,
+    pub fn add_io<FD, F>(&'e mut self, fd: FD, events: IoEventTriggering, callback: F) -> Result<IoEventSource<'s, FD>, Error>
+        where
             FD: std::os::unix::io::AsRawFd,
-            F: 's + FnMut(IoEventMask) -> i32
+            F: 's + FnMut(IoEventMask) -> i32,
     {
         let callback = Box::new(callback);
         let userdata = &*callback as *const _ as *const libc::c_void;
@@ -207,10 +228,10 @@ impl<'e> Event {
         })
     }
 
-    pub fn add_time<'z, 's, EC, F>(&'z mut self, usec: EC, accuracy: time::Duration, callback: F) -> Result<TimeEventSource<'s, EC>, Error>
-        where 'e: 'z, 'e: 's,
+    pub fn add_time<EC, F>(&'e mut self, usec: EC, accuracy: time::Duration, callback: F) -> Result<&'s TimeEventSource<'s, EC>, Error>
+        where
             EC: ClockTimestamp,
-            F: 's + FnMut(EC) -> i32
+            F: 's + FnMut(EC) -> i32,
     {
         let (clock, usec) = (EC::clock(), usec.as_usec());
         let accuracy = match accuracy.num_microseconds() {
@@ -236,16 +257,22 @@ impl<'e> Event {
         if rv < 0 {
             return Err(Error::from_negative_errno(rv))
         }
-        Ok(TimeEventSource {
+
+        let mut es = Box::new(TimeEventSource {
             _e: std::marker::PhantomData,
             _ec: std::marker::PhantomData,
             s: s,
             cb: callback,
-        })
+        });
+        // let esr = &es;
+        // self.sources.borrow_mut().insert(es);
+        // Ok(esr)
+        Err(Error::from_negative_errno(-1))
     }
 
-    pub fn add_signal<'z, 's, F>(&'z mut self, signal: i32, callback: F) -> Result<SignalEventSource<'s>, Error>
-        where 'e: 'z, 'e: 's, F: 's + FnMut(signalfd::SignalfdSigInfo) -> i32
+    pub fn add_signal<F>(&'e mut self, signal: i32, callback: F) -> Result<SignalEventSource<'s>, Error>
+        where
+            F: 's + FnMut(signalfd::SignalfdSigInfo) -> i32,
     {
         let callback = Box::new(callback);
         let userdata = &*callback as *const _ as *const libc::c_void;
@@ -271,8 +298,9 @@ impl<'e> Event {
         })
     }
 
-    pub fn add_defer<'z, 's, F>(&'z mut self, callback: F) -> Result<DeferEventSource<'s>, Error>
-        where 'e: 'z, 'e: 's, F: 's + FnMut() -> i32
+    pub fn add_defer<F>(&'e mut self, callback: F) -> Result<DeferEventSource<'s>, Error>
+        where
+            F: 's + FnMut() -> i32,
     {
         let callback = Box::new(callback);
         let userdata = &*callback as *const _ as *const libc::c_void;
@@ -297,8 +325,9 @@ impl<'e> Event {
         })
     }
 
-    pub fn add_post<'z, 's, F>(&'z mut self, callback: F) -> Result<PostEventSource<'s>, Error>
-        where 'e: 'z, 'e: 's, F: 's + FnMut() -> i32
+    pub fn add_post<F>(&'e mut self, callback: F) -> Result<PostEventSource<'s>, Error>
+        where
+            F: 's + FnMut() -> i32,
     {
         let callback = Box::new(callback);
         let userdata = &*callback as *const _ as *const libc::c_void;
@@ -323,8 +352,9 @@ impl<'e> Event {
         })
     }
 
-    pub fn add_exit<'z, 's, F>(&'z mut self, callback: F) -> Result<ExitEventSource<'s>, Error>
-        where 'e: 'z, 'e: 's, F: 's + FnMut() -> i32
+    pub fn add_exit<F>(&'e mut self, callback: F) -> Result<ExitEventSource<'s>, Error>
+        where
+            F: 's + FnMut() -> i32,
     {
         let callback = Box::new(callback);
         let userdata = &*callback as *const _ as *const libc::c_void;
@@ -350,7 +380,7 @@ impl<'e> Event {
     }
 }
 
-impl<'e> Event {
+impl<'e, 's> Event<'s> {
     pub fn run(&'e self, timeout: time::Duration) -> Result<bool, Error> {
         let timeout = match timeout.num_microseconds() {
             None => return Err(Error::from_negative_errno(-EINVAL)),
@@ -388,7 +418,7 @@ impl<'e> Event {
     }
 }
 
-pub trait EventSource {
+pub trait EventSource: std::fmt::Debug {
     fn as_raw(&self) -> ffi::sd_event_source;
 
     fn enabled(&self) -> Result<EventSourceEnabled, Error> {
@@ -410,6 +440,20 @@ pub trait EventSource {
             return Err(Error::from_negative_errno(rv))
         }
         Ok(())
+    }
+}
+
+impl PartialEq for EventSource {
+    fn eq(&self, other: &EventSource) -> bool {
+        self.as_raw() == other.as_raw()
+    }
+}
+impl Eq for EventSource {
+}
+
+impl std::hash::Hash for EventSource {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_usize(self.as_raw() as usize)
     }
 }
 
@@ -570,20 +614,20 @@ impl From<IoEventTriggering> for libc::uint32_t {
     }
 }
 
-pub struct IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
-    _e: std::marker::PhantomData<&'e Event>,
+pub struct IoEventSource<'s, FD> where FD: std::os::unix::io::AsRawFd {
+    _e: std::marker::PhantomData<&'s Event<'s>>,
     s: ffi::sd_event_source,
     fd: FD,
-    #[allow(dead_code)] cb: Box<FnMut(IoEventMask) -> i32 + 'e>,
+    #[allow(dead_code)] cb: Box<FnMut(IoEventMask) -> i32 + 's>,
 }
 
-impl<'e, FD> std::fmt::Debug for IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
+impl<'e, 's, FD> std::fmt::Debug for IoEventSource<'s, FD> where FD: std::os::unix::io::AsRawFd {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "IoEventSource{{ s: {:?} }}", self.s)
     }
 }
 
-impl<'e, FD> std::ops::Drop for IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
+impl<'e, 's, FD> std::ops::Drop for IoEventSource<'s, FD> where FD: std::os::unix::io::AsRawFd {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_source_unref(self.s);
@@ -591,13 +635,13 @@ impl<'e, FD> std::ops::Drop for IoEventSource<'e, FD> where FD: std::os::unix::i
     }
 }
 
-impl<'e, FD> EventSource for IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
+impl<'e, 's, FD> EventSource for IoEventSource<'s, FD> where FD: std::os::unix::io::AsRawFd {
     fn as_raw(&self) -> ffi::sd_event_source {
         self.s
     }
 }
 
-impl<'e, FD> IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
+impl<'e, 's, FD> IoEventSource<'s, FD> where FD: std::os::unix::io::AsRawFd {
     pub fn fd(&self) -> &FD {
         &self.fd
     }
@@ -616,20 +660,20 @@ impl<'e, FD> IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
 }
 
 
-pub struct TimeEventSource<'e, EC> {
-    _e: std::marker::PhantomData<&'e Event>,
+pub struct TimeEventSource<'s, EC> {
+    _e: std::marker::PhantomData<&'s Event<'s>>,
     _ec: std::marker::PhantomData<EC>,
     s: ffi::sd_event_source,
-    #[allow(dead_code)] cb: Box<FnMut(EC) -> i32 + 'e>,
+    #[allow(dead_code)] cb: Box<FnMut(EC) -> i32 + 's>,
 }
 
-impl<'e, EC> std::fmt::Debug for TimeEventSource<'e, EC> {
+impl<'e, 's, EC> std::fmt::Debug for TimeEventSource<'s, EC> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         f.write_str("timeeventsource")
     }
 }
 
-impl<'e, EC> std::ops::Drop for TimeEventSource<'e, EC> {
+impl<'e, 's, EC> std::ops::Drop for TimeEventSource<'s, EC> {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_source_unref(self.s);
@@ -637,13 +681,13 @@ impl<'e, EC> std::ops::Drop for TimeEventSource<'e, EC> {
     }
 }
 
-impl<'e, EC> EventSource for TimeEventSource<'e, EC> {
+impl<'e, 's, EC> EventSource for TimeEventSource<'s, EC> {
     fn as_raw(&self) -> ffi::sd_event_source {
         self.s
     }
 }
 
-impl<'e, EC: ClockTimestamp> TimeEventSource<'e, EC> {
+impl<'e, 's, EC: ClockTimestamp> TimeEventSource<'s, EC> {
     pub fn time(&self) -> Result<EC, Error> {
         let mut usec: libc::uint64_t = 0;
         let rv = unsafe {
@@ -704,19 +748,19 @@ impl<'e, EC: ClockTimestamp> TimeEventSource<'e, EC> {
 }
 
 
-pub struct SignalEventSource<'e> {
-    _e: std::marker::PhantomData<&'e Event>,
+pub struct SignalEventSource<'s> {
+    _e: std::marker::PhantomData<&'s Event<'s>>,
     s: ffi::sd_event_source,
-    #[allow(dead_code)] cb: Box<FnMut(signalfd::SignalfdSigInfo) -> i32 + 'e>,
+    #[allow(dead_code)] cb: Box<FnMut(signalfd::SignalfdSigInfo) -> i32 + 's>,
 }
 
-impl<'e> std::fmt::Debug for SignalEventSource<'e> {
+impl<'e, 's> std::fmt::Debug for SignalEventSource<'s> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "SignalEventSource{{ s: {:?} }}", self.s)
     }
 }
 
-impl<'e> std::ops::Drop for SignalEventSource<'e> {
+impl<'e, 's> std::ops::Drop for SignalEventSource<'s> {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_source_unref(self.s);
@@ -724,13 +768,13 @@ impl<'e> std::ops::Drop for SignalEventSource<'e> {
     }
 }
 
-impl<'e> EventSource for SignalEventSource<'e> {
+impl<'e, 's> EventSource for SignalEventSource<'s> {
     fn as_raw(&self) -> ffi::sd_event_source {
         self.s
     }
 }
 
-impl<'e> SignalEventSource<'e> {
+impl<'e, 's> SignalEventSource<'s> {
     pub fn signal(&self) -> Result<i32, Error> {
         let rv = unsafe {
             ffi::sd_event_source_get_signal(self.s)
@@ -743,19 +787,19 @@ impl<'e> SignalEventSource<'e> {
 }
 
 
-pub struct DeferEventSource<'e> {
-    _e: std::marker::PhantomData<&'e Event>,
+pub struct DeferEventSource<'s> {
+    _e: std::marker::PhantomData<&'s Event<'s>>,
     s: ffi::sd_event_source,
-    #[allow(dead_code)] cb: Box<FnMut() -> i32 + 'e>,
+    #[allow(dead_code)] cb: Box<FnMut() -> i32 + 's>,
 }
 
-impl<'e> std::fmt::Debug for DeferEventSource<'e> {
+impl<'e, 's> std::fmt::Debug for DeferEventSource<'s> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "DeferEventSource{{ s: {:?} }}", self.s)
     }
 }
 
-impl<'e> std::ops::Drop for DeferEventSource<'e> {
+impl<'e, 's> std::ops::Drop for DeferEventSource<'s> {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_source_unref(self.s);
@@ -763,26 +807,26 @@ impl<'e> std::ops::Drop for DeferEventSource<'e> {
     }
 }
 
-impl<'e> EventSource for DeferEventSource<'e> {
+impl<'e, 's> EventSource for DeferEventSource<'s> {
     fn as_raw(&self) -> ffi::sd_event_source {
         self.s
     }
 }
 
 
-pub struct PostEventSource<'e> {
-    _e: std::marker::PhantomData<&'e Event>,
+pub struct PostEventSource<'s> {
+    _e: std::marker::PhantomData<&'s Event<'s>>,
     s: ffi::sd_event_source,
-    #[allow(dead_code)] cb: Box<FnMut() -> i32 + 'e>,
+    #[allow(dead_code)] cb: Box<FnMut() -> i32 + 's>,
 }
 
-impl<'e> std::fmt::Debug for PostEventSource<'e> {
+impl<'e, 's> std::fmt::Debug for PostEventSource<'s> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "DeferEventSource{{ s: {:?} }}", self.s)
     }
 }
 
-impl<'e> std::ops::Drop for PostEventSource<'e> {
+impl<'e, 's> std::ops::Drop for PostEventSource<'s> {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_source_unref(self.s);
@@ -790,26 +834,26 @@ impl<'e> std::ops::Drop for PostEventSource<'e> {
     }
 }
 
-impl<'e> EventSource for PostEventSource<'e> {
+impl<'e, 's> EventSource for PostEventSource<'s> {
     fn as_raw(&self) -> ffi::sd_event_source {
         self.s
     }
 }
 
 
-pub struct ExitEventSource<'e> {
-    _e: std::marker::PhantomData<&'e Event>,
+pub struct ExitEventSource<'s> {
+    _e: std::marker::PhantomData<&'s Event<'s>>,
     s: ffi::sd_event_source,
-    #[allow(dead_code)] cb: Box<FnMut() -> i32 + 'e>,
+    #[allow(dead_code)] cb: Box<FnMut() -> i32 + 's>,
 }
 
-impl<'e> std::fmt::Debug for ExitEventSource<'e> {
+impl<'e, 's> std::fmt::Debug for ExitEventSource<'s> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         write!(f, "ExitEventSource{{ s: {:?} }}", self.s)
     }
 }
 
-impl<'e> std::ops::Drop for ExitEventSource<'e> {
+impl<'e, 's> std::ops::Drop for ExitEventSource<'s> {
     fn drop(&mut self) {
         unsafe {
             ffi::sd_event_source_unref(self.s);
@@ -817,7 +861,7 @@ impl<'e> std::ops::Drop for ExitEventSource<'e> {
     }
 }
 
-impl<'e> EventSource for ExitEventSource<'e> {
+impl<'e, 's> EventSource for ExitEventSource<'s> {
     fn as_raw(&self) -> ffi::sd_event_source {
         self.s
     }
