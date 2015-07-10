@@ -186,7 +186,7 @@ impl<'e> Event {
         let callback = Box::new(callback);
         let userdata = &*callback as *const _ as *const libc::c_void;
 
-        extern fn event_source_io_tramp<F>(_: ffi::sd_event_source, fd: libc::c_int, revents: libc::uint32_t, userdata: *const libc::c_void) -> libc::c_int
+        extern fn event_source_io_tramp<F>(_: ffi::sd_event_source, _fd: libc::c_int, revents: libc::uint32_t, userdata: *const libc::c_void) -> libc::c_int
             where F: FnMut(IoEventMask) -> i32
         {
             let cb_ptr = userdata as *mut F;
@@ -604,16 +604,15 @@ impl<'e, FD> IoEventSource<'e, FD> where FD: std::os::unix::io::AsRawFd {
     pub fn fd_mut(&mut self) -> &mut FD {
         &mut self.fd
     }
-    // pub fn signal(&self) -> Result<i32, Error> {
-    //     let mut signal: libc::c_int = 0;
-    //     let rv = unsafe {
-    //         ffi::sd_event_source_get_signal(self.s, &mut signal)
-    //     };
-    //     if rv < 0 {
-    //         return Err(Error::from_negative_errno(rv))
-    //     }
-    //     Ok(signal)
-    // }
+    pub fn signal(&self) -> Result<i32, Error> {
+        let rv = unsafe {
+            ffi::sd_event_source_get_signal(self.s)
+        };
+        if rv < 0 {
+            return Err(Error::from_negative_errno(rv))
+        }
+        Ok(rv)
+    }
 }
 
 
